@@ -65,8 +65,8 @@ cd ..
 echo ---------------------------------------------------------------
 
 :Menu1
+echo                          Notes:
 echo ---------------------------------------------------------------
-echo Please choose from the following options:
 echo - This project requires/assumes you have Python 3.10 installed as well as Git.
 echo   If you don't have both or either of these, choose option 'X' first.
 echo - Make sure you have a HuggingFace account (https://huggingface.co)
@@ -76,6 +76,8 @@ echo - TLDR; Install, Login (or don't and use non-gated models or Mistral option
 echo   then choose a method to interact with an LLM. If you don't know, use the recommended 
 echo   options.
 echo - Press Ctrl+c to exit at any time!
+echo ---------------------------------------------------------------
+echo           Please choose from the following options:
 echo ---------------------------------------------------------------
 echo 1) Install torchchat.
 echo L) Login to HuggingFace (Recommended) (Necessary for dwonloading gated models. If you 
