@@ -71,7 +71,8 @@ echo - This project requires/assumes you have Python 3.10 installed as well as G
 echo   If you don't have both or either of these, choose option 'X' first.
 echo - Make sure you have a HuggingFace account (https://huggingface.co)
 echo - Make sure you generate a token with write access.
-echo - Make sure you have access on HuggingFace for any gated models you want to use
+echo - Make sure you have access on HuggingFace for any gated models you want to use.
+echo - Feel free to close any extra CMD windows that pop up.
 echo - TLDR; Install, Login (or don't and use non-gated models or Mistral options), and
 echo   then choose a method to interact with an LLM. If you don't know, use the recommended 
 echo   options.
@@ -100,8 +101,8 @@ if %option% == 1 goto Install
 if %option% == 2 goto CLI
 if %option% == 3 goto CLIMistral
 if %option% == 4 goto CLILlama3.1
-if %option% == 3 goto StreamlitMistral
-if %option% == 3 goto StreamlitLlama3.1
+if %option% == 5 goto StreamlitMistral
+if %option% == 6 goto StreamlitLlama3.1
 if %option% == L goto HuggingFaceLogin
 if %option% == l goto HuggingFaceLogin
 if %option% == X goto Python/GitInstall
@@ -236,7 +237,7 @@ if not exist venv (
 )
 echo Activating virtual environment
 call .venv\Scripts\activate
-start start python torchchat.py chat mistral
+start start call python torchchat.py chat mistral
 goto Menu1
 
 :CLILlama3.1
@@ -251,7 +252,7 @@ if not exist venv (
 )
 echo Activating virtual environment
 call .venv\Scripts\activate
-start start python torchchat.py chat llama3.1
+start start call python torchchat.py chat llama3.1
 goto Menu1
 
 :StreamlitMistral
