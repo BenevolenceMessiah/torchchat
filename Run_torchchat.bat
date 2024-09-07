@@ -47,9 +47,9 @@ timeout /t 3
 echo As-salamu alaykum!!
 echo detecting presence of repo, git cloning if not detected...
 echo ---------------------------------------------------------------
-if exist tools\ goto Menu1
+if exist audio\ goto Menu1
 git clone https://github.com/BenevolenceMessiah/torchchat.git
-cd distributed-llama
+cd torchchat
 git pull
 cd audio
 set "file=Benevolence_Messiah_DJ_Kwe.wav"
