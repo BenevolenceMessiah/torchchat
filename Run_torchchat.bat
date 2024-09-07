@@ -72,7 +72,9 @@ echo   If you don't have both or either of these, choose option 'X' first.
 echo - Make sure you have a HuggingFace account (https://huggingface.co)
 echo - Make sure you generate a token with write access.
 echo - Make sure you have access on HuggingFace for any gated models you want to use
-echo - TLDR; Install, Login (or don't and use non-gated models or Mistral options), 
+echo - TLDR; Install, Login (or don't and use non-gated models or Mistral options), and
+echo   then choose a method to interact with an LLM. If you don't know, use the recommended 
+echo   options.
 echo - Press Ctrl+c to exit at any time!
 echo ---------------------------------------------------------------
 echo 1) Install torchchat.

@@ -9,6 +9,7 @@ __pycache__/
 .model-artifacts/
 .venv
 .torchchat
+audio
 
 # Build directories
 build/android/*
