@@ -266,11 +266,11 @@ if not exist venv (
 echo Activating virtual environment
 call .venv\Scripts\activate
 echo ---------------------------------------------------------------
-Start start torchchat.py server mistral
+Start start python torchchat.py server mistral
 :: start start streamlit run torchchat.py -- browser mistral
 cd torchchat
 cd usages
-start start streamlit run browser.py
+start call streamlit run python browser.py
 cd ..
 cd ..
 goto Menu1
@@ -286,11 +286,11 @@ if not exist venv (
 echo Activating virtual environment
 call .venv\Scripts\activate
 echo ---------------------------------------------------------------
-Start start torchchat.py server llama3.1
+Start call python torchchat.py server llama3.1
 :: start start streamlit run torchchat.py -- browser mistral
 cd torchchat
 cd usages
-start start streamlit run browser.py
+start call streamlit run browser.py
 cd ..
 cd ..
 goto Menu1
