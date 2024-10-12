@@ -28,7 +28,7 @@ default_device = "cpu"
 
 
 """
-Export for Server 
+Export for Server
 """
 
 
@@ -54,7 +54,7 @@ def export_for_server(
             torch.tensor([0, 1, 2, 3, 4], dtype=torch.int, device=device),
         )
 
-        seq = Dim("seq", min=1, max=model.config.transformer_args["text"].max_seq_length)
+        seq = Dim("seq", min=1, max=model.text_transformer_args.max_seq_length)
         # Specify that the first dimension of each input is that batch size
         dynamic_shapes = {"tokens": {1: seq}, "input_pos": {0: seq}}
     else:
@@ -78,7 +78,7 @@ def export_for_server(
 """
 Export for ExecuTorch
 
-TODO (https://github.com/pytorch/torchchat/issues/1058): Replace 
+TODO (https://github.com/pytorch/torchchat/issues/1058): Replace
 replace_attention_with_custom_sdpa_attention with ET's implementation
 """
 
@@ -93,6 +93,9 @@ try:
 
     from executorch.backends.xnnpack.partition.xnnpack_partitioner import (
         XnnpackDynamicallyQuantizedPartitioner,
+    )
+    from executorch.backends.xnnpack._passes.convert_to_linear import (
+        ConvertToLinearPass,
     )
     from executorch.exir import EdgeProgramManager, to_edge
 
@@ -152,19 +155,24 @@ try:
             self.wo = attention.wo
 
             max_batch_size, n_heads, max_seq_length, head_dim = (
-                attention.kv_cache.k_cache.shape
+                attention.kv_cache[0].k_cache.shape
             )
-            cache_dtype = attention.kv_cache.k_cache.dtype
-            self.kv_cache = CustomKVCache(
-                max_batch_size, max_seq_length, n_heads, head_dim, cache_dtype
-            )
+            cache_dtype = attention.kv_cache[0].k_cache.dtype
+            # The `Attention` module being replaced can have multiple KV caches
+            # (denoted by `cache_lanes`).  Thus we follow the same setup format
+            # as in `Attention.setup_cache`.
+            cache_lanes = len(attention.kv_cache)
+            self.kv_cache = nn.ModuleList([
+                CustomKVCache(max_batch_size, max_seq_length, n_heads, head_dim, cache_dtype)
+                for _ in range(cache_lanes)
+            ])
 
             self.n_heads = attention.n_heads
             self.head_dim = attention.head_dim
             self.n_local_heads = attention.n_local_heads
             self.dim = attention.dim
 
-        def forward(self, x, freqs_cis, mask, input_pos=None):
+        def forward(self, x, freqs_cis, mask, input_pos=None, cache_lane: int = 0):
             bsz, seqlen, _ = x.shape
 
             q = self.wq(x)
@@ -181,20 +189,21 @@ try:
 
             # KV cache should always be enabled
             assert self.kv_cache is not None
+            kv_cache = self.kv_cache[cache_lane]
             output = torch.ops.llama.sdpa_with_kv_cache(
                 q,
                 k,
                 v,
-                self.kv_cache.k_cache,
-                self.kv_cache.v_cache,
+                kv_cache.k_cache,
+                kv_cache.v_cache,
                 input_pos[-1].item(),
                 seqlen,
             )
-            output = output.view(bsz, seqlen, self.dim).to(dtype=q.dtype)
+            output = output.view(bsz, seqlen, self.dim).to(dtype=x.dtype)
             return self.wo(output)
 
     def replace_attention_with_custom_sdpa_attention(module: nn.Module):
-        from executorch.examples.models.llama2.custom_ops import (  # noqa
+        from executorch.extension.llm.custom_ops import (  # noqa
             sdpa_with_kv_cache,
         )
 
@@ -274,22 +283,16 @@ try:
             _skip_type_promotion=bool(target_precision == torch.float16),
         )
 
-        if target_precision == torch.float16 or target_precision == torch.bfloat16:
-            if state_dict_dtype != torch.float16:
-                print("model.to torch.float16")
-                model = model.to(dtype=torch.float16)
-                state_dict_dtype = torch.float16
-        elif target_precision == torch.float32:
-            if state_dict_dtype != torch.float32:
-                print("model.to torch.float32")
-                model = model.to(dtype=torch.float32)
-        elif target_precision == torch.bfloat16:
-            print("model.to torch.bfloat16")
-            model = model.to(dtype=torch.bfloat16)
-        else:
+        if target_precision not in (torch.float16, torch.float32, torch.bfloat16):
             raise ValueError(f"Unsupported dtype for ET export: {target_precision}")
 
+        if state_dict_dtype != target_precision:
+            print(f"model.to {target_precision}")
+            model = model.to(dtype=target_precision)
+            state_dict_dtype = target_precision
+
         replace_attention_with_custom_sdpa_attention(model)
+
         with torch.nn.attention.sdpa_kernel(
             [torch.nn.attention.SDPBackend.MATH]
         ), torch.no_grad():
@@ -304,9 +307,9 @@ try:
         edge_manager = edge_manager.to_backend(XnnpackDynamicallyQuantizedPartitioner())
         export_program = edge_manager.to_executorch(
             ExecutorchBackendConfig(
-                extract_constant_segment=True,
                 extract_delegate_segments=True,
                 passes=[
+                    ConvertToLinearPass(),
                     QuantFusionPass(),
                 ],
                 sym_shape_eval_pass=ConstraintBasedSymShapeEvalPass(),
@@ -363,13 +366,17 @@ def main(args):
         except:
             tokenizer = None
 
-        if (
-            output_dso_path is not None
-            and builder_args.max_seq_length is None
-            and not builder_args.dynamic_shapes
-        ):
-            print("Setting max_seq_length to 300 for DSO export.")
-            builder_args.max_seq_length = 300
+        if builder_args.max_seq_length is None:
+            if (
+                output_dso_path is not None
+                and not builder_args.dynamic_shapes
+            ):
+                print("Setting max_seq_length to 300 for DSO export.")
+                builder_args.max_seq_length = 300
+            elif output_pte_path is not None:
+                # The value of 128 was chosen to match the ExecuTorch Llama example setup.
+                print("Setting max_seq_length to 128 for ExecuTorch export.")
+                builder_args.max_seq_length = 128
 
         model = _initialize_model(
             builder_args,

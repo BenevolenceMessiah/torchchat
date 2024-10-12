@@ -4,19 +4,28 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import base64
 import os
 import time
 import uuid
 
 from abc import ABC
 from dataclasses import dataclass
+from io import BytesIO
 from pwd import getpwuid
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 
+from PIL import Image
+
+from torchtune.data import Message, padded_collate_tiled_images_and_mask
+
+from torchtune.models.llama3_2_vision._model_builders import llama3_2_vision_transform
+
 from torchchat.cli.download import is_model_downloaded, load_model_configs
 from torchchat.generate import Generator, GeneratorArgs
+from torchchat.model import FlamingoModel
 
 from torchchat.utils.build_utils import device_sync
 
@@ -32,6 +41,46 @@ OPENAI_API_DEFAULT_MAX_TOKENS = 16
 
 
 @dataclass
+class _ContentPart(ABC):
+    """A single part of a message content field.
+
+    See the "Assistants >>> Messages >>> Create Message >>> Request body >>> content >>> Show possible types" section of the OpenAI API docs for more details.
+    """
+
+    type: str
+
+
+@dataclass
+class ImageFile:
+    file_id: str
+    detail: Optional[str]
+
+
+@dataclass
+class ImageFileContentPart(_ContentPart):
+    type: str = "image_file"
+    image_file: Optional[ImageFile] = None
+
+
+@dataclass
+class ImageUrl:
+    url: str
+    detail: Optional[str]
+
+
+@dataclass
+class ImageUrlContentPart(_ContentPart):
+    type: str = "image_url"
+    image_url: Optional[ImageUrl] = None
+
+
+@dataclass
+class TextContentPart(_ContentPart):
+    text: str = ""
+    type: str = "text"
+
+
+@dataclass
 class _AbstractMessage(ABC):
     """Base class with common parameters for message types.
 
@@ -42,7 +91,7 @@ class _AbstractMessage(ABC):
     """
 
     role: str
-    content: Optional[str] = None
+    content: Optional[Union[List[_ContentPart], str]] = None
 
 
 @dataclass
@@ -185,7 +234,7 @@ class ChunkDelta:
 
     tool_calls: Optional[List[ToolCall]]
     role: Optional[str]
-    content: Optional[str]
+    content: Optional[Union[List[_ContentPart], str]] = None
 
 
 @dataclass
@@ -232,16 +281,56 @@ class OpenAiApiGenerator(Generator):
         """
 
         super().__init__(*args, **kwargs)
-        self.max_seq_length = (
-            self.model.config.transformer_args["text"].max_seq_length
-            + self.speculative_builder_args.speculate_k
-            + 1
-            if self.draft_model is not None
-            else self.model.config.transformer_args["text"].max_seq_length
-        )
+        try:
+            self.max_seq_length = (
+                self.model.text_transformer_args.max_seq_length
+                + self.speculative_builder_args.speculate_k
+                + 1
+                if self.draft_model is not None
+                else self.model.text_transformer_args.max_seq_length
+            )
+        except:
+            self.max_seq_length = 2048
+            print(
+                f"can not find max_seq_length in model config, use default value: {self.max_seq_length}"
+            )
         # The System fingerprint is a unique identifier for the model and its configuration.
         self.system_fingerprint = (
             f"{self.builder_args.device}_{self.builder_args.precision}"
+        )
+
+    def _gen_model_inputs_from_openai_completion_request(
+        self, completion_request: CompletionRequest
+    ) -> List[Message]:
+        """Generate model inputs from an OpenAI completion request.
+
+        Args:
+            completion_request: Request object with prompt and other parameters.
+
+        Returns:
+            Modle inputs.
+        """
+        messages = completion_request.messages
+
+        # Not Llama 3.2 11B
+        if not isinstance(self.model, FlamingoModel):
+            prompt = [
+                {"role": message["role"], "content": message["content"]}
+                for message in messages
+            ]
+            return self._gen_model_input(
+                prompt=prompt, max_new_tokens=completion_request.max_tokens
+            )
+
+        # Llama 3.2 11B
+
+        prompt = [
+            {"role": message["role"], "content": message["content"]}
+            for message in messages
+        ]
+
+        return self._gen_model_input(
+            prompt=prompt, max_new_tokens=completion_request.max_tokens
         )
 
     def chunked_completion(self, completion_request: CompletionRequest):
@@ -269,18 +358,12 @@ class OpenAiApiGenerator(Generator):
 
         # Initialize counters for chunk responses and encode the prompt.
         id = str(uuid.uuid4())
-
-        idx = 0
-        tokens = self.chat_formatter.encode_dialog_prompt(
-            dialog=[
-                {"role": message["role"], "content": message["content"]}
-                for message in completion_request.messages
-            ]
+        device_sync(device=self.builder_args.device)
+        encoded, batch = self._gen_model_inputs_from_openai_completion_request(
+            completion_request
         )
 
-        encoded = torch.tensor(tokens, dtype=torch.int, device=self.builder_args.device)
-        print(self.tokenizer.decode(tokens))
-
+        idx = 0
         start_pos = 0
 
         generator_args = GeneratorArgs(
@@ -313,6 +396,7 @@ class OpenAiApiGenerator(Generator):
             draft_model=self.draft_model,
             speculate_k=generator_args.speculate_k,
             chat_mode=generator_args.chat_mode,
+            batch=batch,
             callback=callback,
             temperature=generator_args.temperature,
             top_k=generator_args.top_k,
@@ -323,10 +407,12 @@ class OpenAiApiGenerator(Generator):
         ):
             if y is None:
                 continue
+
             elif y.item() == self.tokenizer.eos_id:
                 # Stop generation if the EOS token is generated.
                 break
 
+            y = y.view(-1)
             # Decode the torch.Tensor token to a string and append to the buffer. Separate the sequences with a period token.
             content = "".join(
                 self.tokenizer.decode([self.tokenizer.encode(".")[0]] + y.tolist())[1:]

@@ -25,6 +25,8 @@ if [ $# -eq 0 ]; then
     show_help
     exit 1
 fi
+
+LINK_TORCHAO_OPS=OFF
 while (( "$#" )); do
   case "$1" in
     -h|--help)
@@ -41,6 +43,11 @@ while (( "$#" )); do
       TARGET="et"
       shift
       ;;
+    link_torchao_ops)
+      echo "Linking with torchao ops..."
+      LINK_TORCHAO_OPS=ON
+      shift
+      ;;
     *)
       echo "Invalid option: $1"
       show_help
@@ -49,15 +56,7 @@ while (( "$#" )); do
   esac
 done
 
-if [ -z "${TORCHCHAT_ROOT}" ]; then
-    # Get the absolute path of the current script
-    SCRIPT_PATH="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
-    # Get the absolute path of the parent directory
-    TORCHCHAT_ROOT="$(dirname "$SCRIPT_PATH")"
-    source "$TORCHCHAT_ROOT/scripts/install_utils.sh"
-else
-    source "$TORCHCHAT_ROOT/torchchat/utils/scripts/install_utils.sh"
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/install_utils.sh"
 
 if [ -z "${ET_BUILD_DIR}" ]; then
     ET_BUILD_DIR="et-build"
@@ -68,18 +67,33 @@ pushd ${TORCHCHAT_ROOT}
 git submodule update --init
 git submodule sync
 if [[ "$TARGET" == "et" ]]; then
+  if [ ! -d "${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install" ]; then
+    echo "Directory ${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install does not exist."
+    echo "Make sure you run install_executorch_libs"
+    exit 1
+  fi
+
+  if [[ "$LINK_TORCHAO_OPS" == "ON" ]]; then
+    if [ ! -d "${TORCHCHAT_ROOT}/torchao-build" ]; then
+      echo "Directory ${TORCHCHAT_ROOT}/torchao-build does not exist."
+      echo "Make sure you run clone_torchao"
+      exit 1
+    fi
+
+    source "$(dirname "${BASH_SOURCE[0]}")/install_utils.sh"
     find_cmake_prefix_path
-    install_pip_dependencies
-    clone_executorch
-    install_executorch_libs false
+    EXECUTORCH_INCLUDE_DIRS="${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install/include;${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/src"
+    EXECUTORCH_LIBRARIES="${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install/lib/libexecutorch_no_prim_ops.a;${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install/lib/libextension_threadpool.a;${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install/lib/libcpuinfo.a;${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install/lib/libpthreadpool.a"
+    install_torchao_executorch_ops
+  fi
 fi
 popd
 
 # CMake commands
 if [[ "$TARGET" == "et" ]]; then
-    cmake -S . -B ./cmake-out -DCMAKE_PREFIX_PATH=`python3 -c 'import torch;print(torch.utils.cmake_prefix_path)'` -DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=1" -G Ninja
+    cmake -S . -B ./cmake-out -DCMAKE_PREFIX_PATH=`python3 -c 'import torch;print(torch.utils.cmake_prefix_path)'` -DLINK_TORCHAO_OPS="${LINK_TORCHAO_OPS}" -DET_USE_ADAPTIVE_THREADS=ON -DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=1" -G Ninja
 else
-    cmake -S . -B ./cmake-out -DCMAKE_PREFIX_PATH=`python3 -c 'import torch;print(torch.utils.cmake_prefix_path)'` -DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" -G Ninja
+    cmake -S . -B ./cmake-out -DCMAKE_PREFIX_PATH=`python3 -c 'import torch;print(torch.utils.cmake_prefix_path)'` -DLINK_TORCHAO_OPS="${LINK_TORCHAO_OPS}" -DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" -G Ninja
 fi
 cmake --build ./cmake-out --target "${TARGET}"_run
 

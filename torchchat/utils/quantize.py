@@ -51,6 +51,9 @@ from torchchat.utils.build_utils import (
 )
 
 
+# Flag for whether the a8wxdq quantizer is available.
+a8wxdq_load_error: Optional[Exception] = None
+
 #########################################################################
 ###                  torchchat quantization API                       ###
 
@@ -76,6 +79,10 @@ def quantize_model(
         quantize_options = json.loads(quantize_options)
 
     for quantizer, q_kwargs in quantize_options.items():
+        # Test if a8wxdq quantizer is available; Surface error if not.
+        if quantizer == "linear:a8wxdq" and a8wxdq_load_error is not None:
+            raise Exception(f"Note: Failed to load torchao experimental a8wxdq quantizer with error: {a8wxdq_load_error}")
+
         if (
             quantizer not in quantizer_class_dict
             and quantizer not in ao_quantizer_class_dict
@@ -88,18 +95,24 @@ def quantize_model(
                 if not support_tensor_subclass:
                     unwrap_tensor_subclass(model)
                 continue
-            # Use dtype precision specified in user config, else fallback on global precision.
-            if "precision" in quantize_options:
-                dtype = quantize_options["precision"].get("dtype", str(get_precision()))
-                precision = name_to_dtype(dtype, device)
-            else:
-                precision = get_precision()
+            # We set global precision from quantize options if it is specified at cli.py:485 
+            # so the precision returned by get_precision() is always the authoritative precision/dtype in torchchat
+            precision = get_precision()
 
             try:
-                # Easier to ask forgiveness than permission
-                quant_handler = ao_quantizer_class_dict[quantizer](
-                    groupsize=q_kwargs["groupsize"], device=device, precision=precision
-                )
+                if quantizer == "linear:a8wxdq":
+                    quant_handler = ao_quantizer_class_dict[quantizer](
+                        device=device,
+                        precision=precision,
+                        bitwidth=q_kwargs.get("bitwidth", 4),
+                        groupsize=q_kwargs.get("groupsize", 128),
+                        has_weight_zeros=q_kwargs.get("has_weight_zeros", False),
+                    )
+                else:
+                    # Easier to ask forgiveness than permission
+                    quant_handler = ao_quantizer_class_dict[quantizer](
+                        groupsize=q_kwargs["groupsize"], device=device, precision=precision
+                    )
             except TypeError as e:
                 if "unexpected keyword argument 'device'" in str(e):
                     quant_handler = ao_quantizer_class_dict[quantizer](
@@ -861,3 +874,33 @@ ao_quantizer_class_dict = {
     "linear:int4": Int4WeightOnlyQuantizer,
     "linear:a8w4dq": Int8DynActInt4WeightQuantizer,
 }
+
+try:
+    import importlib.util
+    import sys
+    import os
+    torchao_build_path = f"{os.getcwd()}/torchao-build"
+
+    # Try loading quantizer
+    torchao_experimental_quant_api_spec = importlib.util.spec_from_file_location(
+        "torchao_experimental_quant_api",
+        f"{torchao_build_path}/src/ao/torchao/experimental/quant_api.py",
+    )
+    torchao_experimental_quant_api = importlib.util.module_from_spec(torchao_experimental_quant_api_spec)
+    sys.modules["torchao_experimental_quant_api"] = torchao_experimental_quant_api
+    torchao_experimental_quant_api_spec.loader.exec_module(torchao_experimental_quant_api)
+    from torchao_experimental_quant_api import Int8DynActIntxWeightQuantizer
+    ao_quantizer_class_dict["linear:a8wxdq"] = Int8DynActIntxWeightQuantizer
+
+    # Try loading custom op
+    try:
+        import glob
+        libs = glob.glob(f"{torchao_build_path}/cmake-out/lib/libtorchao_ops_aten.*")
+        libs = list(filter(lambda l: (l.endswith("so") or l.endswith("dylib")), libs))
+        torch.ops.load_library(libs[0])
+    except Exception as e:
+        print("Failed to torchao ops library with error: ", e)
+        print("Slow fallback kernels will be used.")
+
+except Exception as e:
+    a8wxdq_load_error = e

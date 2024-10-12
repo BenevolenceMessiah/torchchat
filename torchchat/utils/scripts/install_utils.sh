@@ -8,8 +8,10 @@
 set -ex pipefail
 
 if [ -z "$TORCHCHAT_ROOT" ]; then
-  echo "Defaulting TORCHCHAT_ROOT to $PWD since it is unset."
-  TORCHCHAT_ROOT=$PWD
+  # Get the absolute path of the current script
+  SCRIPT_PATH="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+  TORCHCHAT_ROOT="$SCRIPT_PATH/../../.."
+  echo "Defaulting TORCHCHAT_ROOT to $TORCHCHAT_ROOT since it is unset."
 fi
 
 install_pip_dependencies() {
@@ -73,6 +75,7 @@ clone_executorch() {
   clone_executorch_internal
 }
 
+
 install_executorch_python_libs() {
   if [ ! -d "${TORCHCHAT_ROOT}/${ET_BUILD_DIR}" ]; then
     echo "Directory ${TORCHCHAT_ROOT}/${ET_BUILD_DIR} does not exist."
@@ -90,6 +93,13 @@ install_executorch_python_libs() {
       echo "Installing pybind"
       bash ./install_requirements.sh --pybind xnnpack
   fi
+
+  # TODO: figure out the root cause of 'AttributeError: module 'evaluate'
+  # has no attribute 'utils'' error from evaluate CI jobs and remove
+  # `import lm_eval` from torchchat.py since it requires a specific version
+  # of numpy.
+  pip install numpy=='1.26.4'
+
   pip3 list
   popd
 }
@@ -102,9 +112,10 @@ COMMON_CMAKE_ARGS="\
     -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON \
     -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON \
     -DEXECUTORCH_BUILD_KERNELS_QUANTIZED=ON \
-    -DEXECUTORCH_BUILD_XNNPACK=ON"
+    -DEXECUTORCH_BUILD_XNNPACK=ON \
+    -DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON"
 
-install_executorch() {
+install_executorch_cpp_libs() {
   # AOT lib has to be build for model export
   # So by default it is built, and you can explicitly opt-out
   EXECUTORCH_BUILD_KERNELS_CUSTOM_AOT_VAR=OFF
@@ -144,21 +155,64 @@ install_executorch() {
         -DCMAKE_PREFIX_PATH=${MY_CMAKE_PREFIX_PATH} \
         -DEXECUTORCH_BUILD_KERNELS_CUSTOM_AOT=${EXECUTORCH_BUILD_KERNELS_CUSTOM_AOT_VAR} \
         -DEXECUTORCH_BUILD_KERNELS_CUSTOM=${EXECUTORCH_BUILD_KERNELS_CUSTOM_VAR} \
-        -DEXECUTORCH_BUILD_XNNPACK=ON \
         ${CROSS_COMPILE_ARGS} \
         -S . -B ${CMAKE_OUT_DIR} -G Ninja
-  cmake --build ${CMAKE_OUT_DIR}
+  cmake --build ${CMAKE_OUT_DIR} -j16
   cmake --install ${CMAKE_OUT_DIR} --prefix ${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install
   popd
 }
 
 install_executorch_libs() {
-  # Install executorch python and C++ libs
-  export CMAKE_ARGS="\
-    ${COMMON_CMAKE_ARGS} \
-    -DCMAKE_PREFIX_PATH=${MY_CMAKE_PREFIX_PATH} \
-    -DCMAKE_INSTALL_PREFIX=${TORCHCHAT_ROOT}/${ET_BUILD_DIR}/install"
-  export CMAKE_BUILD_ARGS="--target install"
-
+  EXECUTORCH_BUILD_KERNELS_CUSTOM_AOT_VAR=OFF
+  EXECUTORCH_BUILD_KERNELS_CUSTOM_VAR=OFF
+  install_executorch_cpp_libs
   install_executorch_python_libs $1
+}
+
+clone_torchao() {
+  echo "Cloning torchao to ${TORCHCHAT_ROOT}/torchao-build/src"
+  rm -rf ${TORCHCHAT_ROOT}/torchao-build
+  mkdir -p ${TORCHCHAT_ROOT}/torchao-build/src
+  pushd ${TORCHCHAT_ROOT}/torchao-build/src
+  echo $pwd
+
+  git clone https://github.com/pytorch/ao.git
+  cd ao
+  git checkout $(cat ${TORCHCHAT_ROOT}/install/.pins/torchao-pin.txt)
+
+  popd
+}
+
+install_torchao_aten_ops() {
+  echo "Building torchao custom ops for ATen"
+  pushd ${TORCHCHAT_ROOT}/torchao-build/src/ao/torchao/experimental
+
+  CMAKE_OUT_DIR=${TORCHCHAT_ROOT}/torchao-build/cmake-out
+  cmake -DCMAKE_PREFIX_PATH=${MY_CMAKE_PREFIX_PATH} \
+    -DCMAKE_INSTALL_PREFIX=${CMAKE_OUT_DIR} \
+    -DCMAKE_BUILD_TYPE="Release" \
+    -DTORCHAO_OP_TARGET="aten" \
+    -S . \
+    -B ${CMAKE_OUT_DIR} -G Ninja
+  cmake --build  ${CMAKE_OUT_DIR} --target install --config Release
+
+  popd
+}
+
+install_torchao_executorch_ops() {
+  echo "Building torchao custom ops for ExecuTorch"
+  pushd ${TORCHCHAT_ROOT}/torchao-build/src/ao/torchao/experimental
+
+  CMAKE_OUT_DIR="${TORCHCHAT_ROOT}/torchao-build/cmake-out"
+  cmake -DCMAKE_PREFIX_PATH=${MY_CMAKE_PREFIX_PATH} \
+    -DCMAKE_INSTALL_PREFIX=${CMAKE_OUT_DIR} \
+    -DCMAKE_BUILD_TYPE="Release" \
+    -DTORCHAO_OP_TARGET="executorch" \
+    -DEXECUTORCH_INCLUDE_DIRS="${EXECUTORCH_INCLUDE_DIRS}" \
+    -DEXECUTORCH_LIBRARIES="${EXECUTORCH_LIBRARIES}" \
+    -S . \
+    -B ${CMAKE_OUT_DIR} -G Ninja
+  cmake --build  ${CMAKE_OUT_DIR} --target install --config Release
+
+  popd
 }

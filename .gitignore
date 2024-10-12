@@ -15,6 +15,7 @@ audio
 # Build directories
 build/android/*
 et-build/*
+torchao-build/*
 runner-et/cmake-out/*
 runner-aoti/cmake-out/*
 cmake-out/
@@ -31,3 +32,6 @@ system_info.txt
 # build artifacts
 checkpoints/
 exportedModels/
+
+# test script
+_torchchat_test_script.py

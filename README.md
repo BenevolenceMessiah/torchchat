@@ -2,6 +2,12 @@
 
 torchchat is a small codebase showcasing the ability to run large language models (LLMs) seamlessly. With torchchat, you can run LLMs using Python, within your own (C/C++) application (desktop or server) and on iOS and Android.
 
+> [!IMPORTANT]
+> Update September 25, 2024: torchchat has multimodal support for **Llama3.2 11B**!!
+>
+> To try it out, finish the [Installation](#Installation) section below, then hop
+> over to our [multimodal guide](docs/multimodal.md) to learn more.
+
 
 ## What can you do with torchchat?
 - [Run models via PyTorch / Python](#running-via-pytorch--python)
@@ -18,6 +24,8 @@ torchchat is a small codebase showcasing the ability to run large language model
 
 
 ## Highlights
+
+- [[New!!] Multimodal Support for Llama 3.2 11B](docs/multimodal.md)
 - Command line interaction with popular LLMs such as Llama 3, Llama 2, Stories, Mistral and more
 - PyTorch-native execution with performance
 - Supports popular hardware and OS
@@ -29,6 +37,38 @@ torchchat is a small codebase showcasing the ability to run large language model
 - Multiple quantization schemes
 - Multiple execution modes including: Python (Eager, Compile) or Native (AOT Inductor (AOTI), ExecuTorch)
 
+
+## Models
+
+The following models are supported by torchchat and have associated
+aliases.
+
+| Model | Mobile Friendly | Notes |
+|------------------|---|---------------------|
+|[meta-llama/Meta-Llama-3.2-3B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct)|✅|Tuned for `chat` . Alias to `llama3.2-3b`.|
+|[meta-llama/Meta-Llama-3.2-3B](https://huggingface.co/meta-llama/Llama-3.2-3B)|✅|Best for `generate`. Alias to `llama3.2-3b-base`.|
+|[meta-llama/Llama-Guard-3-1B](https://huggingface.co/meta-llama/Llama-Guard-3-1B)|✅|Tuned for classification . Alias to `llama3-1b-guard`.|
+|[meta-llama/Meta-Llama-3.2-1B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)|✅|Tuned for `chat` . Alias to `llama3.2-1b`.|
+|[meta-llama/Meta-Llama-3.2-1B](https://huggingface.co/meta-llama/Llama-3.2-1B)|✅|Best for `generate`. Alias to `llama3.2-1b-base`.|
+|[meta-llama/Llama-3.2-11B-Vision-Instruct](https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct)||Multimodal (Image + Text). Tuned for `chat` . Alias to `llama3.2-11B`.|
+|[meta-llama/Llama-3.2-11B-Vision](https://huggingface.co/meta-llama/Llama-3.2-11B-Vision)||Multimodal (Image + Text). Tuned for `generate` . Alias to `llama3.2-11B-base`.|
+|[meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct)|✅|Tuned for `chat` . Alias to `llama3.1`.|
+|[meta-llama/Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B)|✅|Best for `generate`. Alias to `llama3.1-base`.|
+|[meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)|✅|Tuned for `chat` . Alias to `llama3`.|
+|[meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B)|✅|Best for `generate`. Alias to `llama3-base`.|
+|[meta-llama/Llama-2-7b-chat-hf](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf)|✅|Tuned for `chat`. Alias to `llama2`.|
+|[meta-llama/Llama-2-13b-chat-hf](https://huggingface.co/meta-llama/Llama-2-13b-chat-hf)||Tuned for `chat`. Alias to `llama2-13b-chat`.|
+|[meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf)||Tuned for `chat`. Alias to `llama2-70b-chat`.|
+|[meta-llama/Llama-2-7b-hf](https://huggingface.co/meta-llama/Llama-2-7b-hf)|✅|Best for `generate`. Alias to `llama2-base`.|
+|[meta-llama/CodeLlama-7b-Python-hf](https://huggingface.co/meta-llama/CodeLlama-7b-Python-hf)|✅|Tuned for Python and `generate`. Alias to `codellama`.|
+|[meta-llama/CodeLlama-34b-Python-hf](https://huggingface.co/meta-llama/CodeLlama-34b-Python-hf)|✅|Tuned for Python and `generate`. Alias to `codellama-34b`.|
+|[mistralai/Mistral-7B-v0.1](https://huggingface.co/mistralai/Mistral-7B-v0.1)|✅|Best for `generate`. Alias to `mistral-7b-v01-base`.|
+|[mistralai/Mistral-7B-Instruct-v0.1](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.1)|✅|Tuned for `chat`. Alias to `mistral-7b-v01-instruct`.|
+|[mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)|✅|Tuned for `chat`. Alias to `mistral`.|
+|[tinyllamas/stories15M](https://huggingface.co/karpathy/tinyllamas/tree/main)|✅|Toy model for `generate`. Alias to `stories15M`.|
+|[tinyllamas/stories42M](https://huggingface.co/karpathy/tinyllamas/tree/main)|✅|Toy model for `generate`. Alias to `stories42M`.|
+|[tinyllamas/stories110M](https://huggingface.co/karpathy/tinyllamas/tree/main)|✅|Toy model for `generate`. Alias to `stories110M`.|
+|[openlm-research/open_llama_7b](https://huggingface.co/openlm-research/open_llama_7b)|✅|Best for `generate`. Alias to `open-llama`.|
 
 ## Installation
 The following steps require that you have [Python 3.10](https://www.python.org/downloads/release/python-3100/) installed.
@@ -98,7 +138,6 @@ __Evaluation__ (eval)
 * This command test model fidelity via EleutherAI's [lm_evaluation_harness](https://github.com/EleutherAI/lm-evaluation-harness).
 * More information is provided in the [Evaluation](https://github.com/pytorch/torchchat?tab=readme-ov-file#eval) section.
 
-
 ## Download Weights
 Most models use Hugging Face as the distribution channel, so you will need to create a Hugging Face account.
 Create a Hugging Face user access token [as documented here](https://huggingface.co/docs/hub/en/security-tokens) with the `write` role.
@@ -111,9 +150,13 @@ Log into Hugging Face:
 huggingface-cli login
 ```
 
-Once this is done, torchchat will be able to download model artifacts from
-Hugging Face.
+Take a look at the available models:
 
+```bash
+python3 torchchat.py list
+```
+
+Then download one for testing (this README uses llama3.1)
 ```
 python3 torchchat.py download llama3.1
 ```
@@ -126,12 +169,6 @@ python3 torchchat.py download llama3.1
 
 <details>
 <summary>Additional Model Inventory Management Commands</summary>
-
-### List
-This subcommand shows the available models
-```bash
-python3 torchchat.py list
-```
 
 ### Where
 This subcommand shows location of a particular model.
@@ -182,7 +219,7 @@ python3 torchchat.py generate llama3.1 --prompt "write me a story about a boy an
 [skip default]: end
 
 ### Server
-This mode exposes a REST API for interacting with a model. 
+This mode exposes a REST API for interacting with a model.
 The server follows the [OpenAI API specification](https://platform.openai.com/docs/api-reference/chat) for chat completions.
 
 To test out the REST API, **you'll need 2 terminals**: one to host the server, and one to send the request.
@@ -440,9 +477,9 @@ The following assumes you've completed the steps for [Setting up ExecuTorch](#se
 
 1. Download the AAR file, which contains the Java library and corresponding JNI library, to build and run the app.
 
-   - [executorch-llama-tiktoken-rc3-0719.aar](https://ossci-android.s3.amazonaws.com/executorch/main/executorch-llama-tiktoken-rc3-0719.aar) (SHASUM: c3e5d2a97708f033c2b1839a89f12f737e3bbbef)
+   - [executorch.aar](https://ossci-android.s3.amazonaws.com/executorch/release/executorch-241002/executorch.aar) ([sha256sums](https://ossci-android.s3.amazonaws.com/executorch/release/executorch-241002/executorch.aar.sha256sums))
 
-2. Rename the downloaded AAR file to `executorch.aar` and move the file to `android/torchchat/app/libs/`. You may need to create directory `android/torchchat/app/libs/` if it does not exist.
+2. Move the downloaded AAR file to `torchchat/edge/android/torchchat/app/libs/`. You may need to create directory `torchchat/edge/android/torchchat/app/libs/` if it does not exist.
 
 3. Push the model and tokenizer file to your device. You can find the model file called `llama3.1.pte` in the current `torchchat` directory and the tokenizer file at `$(python3 torchchat.py where llama3.1)/tokenizer.model` path.
     ```
@@ -460,9 +497,8 @@ The following assumes you've completed the steps for [Setting up ExecuTorch](#se
 
 6. Follow the app's UI guidelines to pick the model and tokenizer files from the local filesystem. Then issue a prompt.
 
-**Note:** The AAR file listed in Step 1 has the tiktoken tokenizer, which is used for Llama 3. To tweak or use a custom tokenizer and runtime, modify the ExecuTorch code
-and use [this script](https://github.com/pytorch/executorch/blob/main/build/build_android_llm_demo.sh) to build the AAR library. For convenience, we also provide an AAR
-for sentencepiece tokenizer (e.g. Llama 2): [executorch-llama-bpe-rc3-0719.aar](https://ossci-android.s3.amazonaws.com/executorch/main/executorch-llama-bpe-rc3-0719.aar) (SHASUM: d5fe81d9a4700c36b50ae322e6bf34882134edb0)
+**Note:** The AAR file listed in Step 1 has the tiktoken and sentensepiece tokenizer. To tweak or use a custom tokenizer and runtime, modify the ExecuTorch code
+and use [this script](https://github.com/pytorch/executorch/blob/main/build/build_android_llm_demo.sh) to build the AAR library.
 
 <p align="center">
     <img src="https://pytorch.org/executorch/main/_static/img/android_llama_app.png" width="600" alt="Android app running a LlaMA model">
@@ -478,7 +514,6 @@ Alternatively, you can run `torchchat/utils/scripts/android_example.sh` which se
 
 ```
 export TORCHCHAT_ROOT=$(pwd)
-export USE_TIKTOKEN=ON # Set this only for tiktoken tokenizer
 sh torchchat/utils/scripts/android_example.sh
 ```
 
@@ -505,37 +540,6 @@ the same way you would to generate:
 ```
 python3 torchchat.py eval llama3.1 --pte-path llama3.1.pte --limit 5
 ```
-
-
-
-## Models
-
-The following models are supported by torchchat and have associated
-aliases.
-
-| Model | Mobile Friendly | Notes |
-|------------------|---|---------------------|
-|[meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct)|✅|Tuned for `chat` . Alias to `llama3.1`.|
-|[meta-llama/Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B)|✅|Best for `generate`. Alias to `llama3.1-base`.|
-|[meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)|✅|Tuned for `chat` . Alias to `llama3`.|
-|[meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B)|✅|Best for `generate`. Alias to `llama3-base`.|
-|[meta-llama/Llama-2-7b-chat-hf](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf)|✅|Tuned for `chat`. Alias to `llama2`.|
-|[meta-llama/Llama-2-13b-chat-hf](https://huggingface.co/meta-llama/Llama-2-13b-chat-hf)||Tuned for `chat`. Alias to `llama2-13b-chat`.|
-|[meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf)||Tuned for `chat`. Alias to `llama2-70b-chat`.|
-|[meta-llama/Llama-2-7b-hf](https://huggingface.co/meta-llama/Llama-2-7b-hf)|✅|Best for `generate`. Alias to `llama2-base`.|
-|[meta-llama/CodeLlama-7b-Python-hf](https://huggingface.co/meta-llama/CodeLlama-7b-Python-hf)|✅|Tuned for Python and `generate`. Alias to `codellama`.|
-|[meta-llama/CodeLlama-34b-Python-hf](https://huggingface.co/meta-llama/CodeLlama-34b-Python-hf)|✅|Tuned for Python and `generate`. Alias to `codellama-34b`.|
-|[mistralai/Mistral-7B-v0.1](https://huggingface.co/mistralai/Mistral-7B-v0.1)|✅|Best for `generate`. Alias to `mistral-7b-v01-base`.|
-|[mistralai/Mistral-7B-Instruct-v0.1](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.1)|✅|Tuned for `chat`. Alias to `mistral-7b-v01-instruct`.|
-|[mistralai/Mistral-7B-Instruct-v0.2](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2)|✅|Tuned for `chat`. Alias to `mistral`.|
-|[tinyllamas/stories15M](https://huggingface.co/karpathy/tinyllamas/tree/main)|✅|Toy model for `generate`. Alias to `stories15M`.|
-|[tinyllamas/stories42M](https://huggingface.co/karpathy/tinyllamas/tree/main)|✅|Toy model for `generate`. Alias to `stories42M`.|
-|[tinyllamas/stories110M](https://huggingface.co/karpathy/tinyllamas/tree/main)|✅|Toy model for `generate`. Alias to `stories110M`.|
-|[openlm-research/open_llama_7b](https://huggingface.co/openlm-research/open_llama_7b)|✅|Best for `generate`. Alias to `open-llama`.|
-
-While we describe how to use torchchat using the popular llama3 model,
-you can perform the example commands with any of these models.
-
 
 ## Design Principles
 

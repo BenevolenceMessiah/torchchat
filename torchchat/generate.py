@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 import argparse
+import base64
 import itertools
 import logging
 import os
@@ -12,12 +13,25 @@ import time
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from io import BytesIO
+from os import PathLike
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch._dynamo.config
 import torch._inductor.config
+
+from PIL import Image
+
+# torchtune model definition dependencies
+from torchtune.data import Message, padded_collate_tiled_images_and_mask
+
+from torchtune.generation import sample as tune_sample
+from torchtune.models.llama3 import llama3_tokenizer
+
+from torchtune.models.llama3_2_vision._model_builders import llama3_2_vision_transform
+from torchtune.training import set_default_dtype
 
 from torchchat.cli.builder import (
     _initialize_model,
@@ -25,8 +39,7 @@ from torchchat.cli.builder import (
     BuilderArgs,
     TokenizerArgs,
 )
-from torchchat.cli.cli import add_arguments_for_verb, arg_init, check_args
-from torchchat.model import Model
+from torchchat.model import Model, ModelType
 from torchchat.utils.build_utils import device_sync, set_precision
 from torchchat.utils.device_info import get_device_info
 
@@ -56,10 +69,18 @@ class Llama3ChatFormatter(_ChatFormatter):
         return tokens
 
     def encode_message(self, message) -> List[int]:
-        tokens = self.encode_header(message["role"]) 
-        tokens.extend(
-            self.tokenizer.encode(message["content"].strip(), bos=False, eos=False)
-        )
+        tokens = self.encode_header(message["role"])
+        if type(message["content"]) is str:
+            tokens.extend(
+                self.tokenizer.encode(message["content"], bos=False, eos=False)
+            )
+        elif type(message["content"]) is list:
+            for content in message["content"]:
+                if content["type"] == "text":
+                    tokens.extend(
+                        self.tokenizer.encode(content["text"], bos=False, eos=False)
+                    )
+
         tokens.append(self.tokenizer.special_tokens["<|eot_id|>"])
         return tokens
 
@@ -82,7 +103,11 @@ class Llama2ChatFormatter(_ChatFormatter):
         tokens = self.tokenizer.encode(f"{B_INST} ")
         first_message = True  # Bool to handle placing the B_INST token. Behavior is weird - the system prompt should have the B_INST, but not the first user message. All following user messages *should* have it. Also, if there is no system prompt, then the user message should have it.
         for message in dialog:
-            content = message["content"].strip()
+            if isinstance(message["content"], list):
+                content = message["content"][0]["text"]
+            else:
+                content = message["content"]
+            content = content.strip()
             if message["role"] == "system":
                 encoded = self.tokenizer.encode(f"{B_SYS}\n{content}\n{E_SYS}")
                 first_message = False
@@ -105,6 +130,9 @@ class GeneratorArgs:
         None  # When passed into the Generator, this will be used as the system prompt
     )
     encoded_prompt: Optional[torch.Tensor] = None
+    image_prompts: Optional[Sequence[Union[str, PathLike, bytes]]] = (
+        None  # string or Path to an image file or the raw base64 bytes of an image
+    )
     chat_mode: bool = False
     gui_mode: bool = False
     num_samples: int = 1
@@ -116,6 +144,7 @@ class GeneratorArgs:
     speculate_k: int = 5
     sequential_prefill: bool = False
     max_autotune: bool = False
+    # (Misnomer) See Issue: https://github.com/pytorch/torchchat/issues/1273
     is_torchtune_model: bool = False
 
     def __post_init__(self):
@@ -148,9 +177,15 @@ class GeneratorArgs:
         pte_path = getattr(args, "pte_path", None)
         sequential_prefill = args.sequential_prefill or bool(dso_path) or bool(pte_path)
 
+        # Validate that all image prompts exist before expensive model load
+        if image_prompts := getattr(args, "image_prompts", None):
+            if not all(os.path.exists(image_prompt) for image_prompt in image_prompts):
+                raise RuntimeError(f"Image prompt {image_prompt} does not exist")
+
         return cls(
             prompt=getattr(args, "prompt", ""),
             encoded_prompt=None,
+            image_prompts=image_prompts,
             chat_mode=args.chat,
             gui_mode=args.gui,
             num_samples=getattr(args, "num_samples", 1),
@@ -189,7 +224,9 @@ class Generator:
         quantize: bool,
         draft_quantize: bool,
     ):
-        torch._inductor.config.coordinate_descent_tuning = False if builder_args.device == "cpu" else True
+        torch._inductor.config.coordinate_descent_tuning = (
+            False if builder_args.device == "cpu" else True
+        )
         torch._inductor.config.triton.unique_kernel_names = True
         torch._inductor.config.fx_graph_cache = True  # Experimental feature to reduce compilation times, will be on by default in future
 
@@ -232,7 +269,6 @@ class Generator:
                 """
             ))
             # fmt: on
-            # raise RuntimeError("You need to use --is-chat-model to indicate model has chat support.")
         self.system_prompt = generator_args.prompt
         self.tokenizer = _initialize_tokenizer(self.tokenizer_args)
 
@@ -241,15 +277,14 @@ class Generator:
         # Piggy backing off of this flag then for now to identify llama3
         # without prompting user.
         self.is_llama3_model = self.tokenizer_args.is_tiktoken
-        if generator_args.chat_mode and self.is_llama3_model:
-            logging.debug(
-                "Llama3 model detected in chat mode. Using updated sentence schemas"
-            )
-        self.chat_formatter = (
-            Llama3ChatFormatter(self.tokenizer)
-            if self.is_llama3_model
-            else Llama2ChatFormatter(self.tokenizer)
-        )
+        if self.is_llama3_model:
+            self.chat_formatter = Llama3ChatFormatter(self.tokenizer)
+            if generator_args.chat_mode:
+                logging.debug(
+                    "Llama3 model detected in chat mode. Using updated sentence schemas"
+                )
+        else:
+            self.chat_formatter = Llama2ChatFormatter(self.tokenizer)
 
         self.builder_args.setup_caches = False
         self.model = _initialize_model(self.builder_args, self.quantize, self.tokenizer)
@@ -300,9 +335,9 @@ class Generator:
         self,
         logits,
         need_probs: bool,
-        temperature: float = 1.0,
+        temperature: float = 0,
         top_k: Optional[int] = None,
-    ):  
+    ):
         if temperature == 0 and not need_probs:
             _, idx_next = torch.topk(logits[0, -1], k=1, dim=-1)
             return (idx_next, None)
@@ -315,6 +350,7 @@ class Generator:
         model: Model,
         x: torch.Tensor,
         input_pos: torch.Tensor,
+        batch: Optional[Dict[str, Any]] = None,  # Inputs for multimodal models
         *,
         sequential_prefill=True,
         **sampling_kwargs,
@@ -323,11 +359,40 @@ class Generator:
         width = x.size(1)
         assert input_pos.size(0) == width
 
-        if sequential_prefill:
+        if self.model.config.model_type == ModelType.Flamingo:
+            assert batch is not None, "Flamingo requires batch"
+
+            # TODO: Verify sequential prefill works with multimodal models
+            is_multimodal = True
+            if "encoder_input" in batch:
+                encoder_input = batch["encoder_input"]
+                encoder_mask = batch["encoder_mask"]
+                is_multimodal = True
+            else:
+                encoder_input = None
+                encoder_mask = None
+                is_multimodal = False
+
+            seq_len = x.size(1)
+            mask = batch["causal_mask"][None, :seq_len]
+            input_pos = input_pos.view(1, -1)
+            logits = model(
+                tokens=x,
+                mask=mask,
+                encoder_input=encoder_input,
+                input_pos=input_pos,
+                encoder_mask=encoder_mask,
+            )[:, -1]
+
+            if is_multimodal:
+                batch["encoder_mask"] = batch["encoder_mask"][:, -1:]
+
+            return tune_sample(logits, temperature=0, top_k=500)
+        elif sequential_prefill:
             for i in range(width):
                 x_sliced, ip_sliced = x[:, i].view(-1, 1), input_pos[i].view(-1)
                 # logging.debug(f"<sliced> x: {x_sliced}, input_pos: {ip_sliced}")
-                logits = model(x_sliced, ip_sliced)  # (x[:, i], input_pos[i])
+                logits = model(x_sliced, ip_sliced)  # (x[:, i], input_pos[i])da
         else:
             # input_pos: [B, S]
             logits = model(x, input_pos)
@@ -342,11 +407,21 @@ class Generator:
         x: torch.Tensor,
         input_pos: torch.Tensor,
         need_probs: bool,
+        batch: Optional[Dict[str, Any]] = None,  # Inputs for multimodal models
         **sampling_kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # input_pos: [B, 1]
         assert input_pos.shape[-1] == 1
-        logits = model(x.view(1, -1), input_pos)
+        x = x.view(1, -1)
+        if model.config.model_type == ModelType.Flamingo:
+            assert batch is not None, "Flamingo requires batch"
+            mask = batch["causal_mask"][None, input_pos.item(), None, :]
+            encoder_mask = batch["encoder_mask"] if "encoder_mask" in batch else None
+            logits = model(
+                x, encoder_mask=encoder_mask, mask=mask, input_pos=input_pos
+            )[:, -1:]
+        else:
+            logits = model(x, input_pos)
         # print(f"x: {x},\n  input_pos: {input_pos}\n")
         return self.sample(logits, need_probs=need_probs, **sampling_kwargs)
 
@@ -363,6 +438,7 @@ class Generator:
         input_pos: torch.Tensor,
         num_new_tokens: int,
         need_probs: bool,
+        batch=Optional[Dict[str, Any]],  # Inputs for multimodal models
         callback=lambda _: _,
         eos_token_id: int = 2,
         eot_id: Optional[int] = None,
@@ -381,6 +457,7 @@ class Generator:
                     model,
                     out_token,
                     input_pos,
+                    batch=batch,
                     need_probs=need_probs,
                     **sampling_kwargs,
                 )
@@ -400,7 +477,12 @@ class Generator:
                 ):
                     encountered_eos = True
                     final_token, next_prob = self.decode_one_token(
-                        model, cur_token, input_pos, need_probs, **sampling_kwargs
+                        model,
+                        cur_token,
+                        input_pos,
+                        need_probs,
+                        batch=batch,
+                        **sampling_kwargs,
                     )
                     input_pos += 1
                     break
@@ -413,14 +495,17 @@ class Generator:
             )
             new_tokens.append(eos_token.clone())
             eos_token, next_prob = self.decode_one_token(
-                model, eos_token.view(1, -1), input_pos, need_probs, **sampling_kwargs
+                model,
+                eos_token.view(1, -1),
+                input_pos,
+                need_probs,
+                batch=batch,
+                **sampling_kwargs,
             )
             input_pos += 1
             yield eos_token.clone(), (
                 next_prob.clone() if next_prob is not None else None
             )
-
-        # return new_tokens, new_probs
 
     def model_forward(self, model, x, input_pos):
         return model(x, input_pos)
@@ -432,6 +517,7 @@ class Generator:
         cur_token: torch.Tensor,
         input_pos: int,
         speculate_k: int,
+        batch: Optional[Dict[str, Any]] = None,  # Inputs for multimodal models
         **sampling_kwargs,
     ) -> torch.Tensor:
         # draft model inference sequentially
@@ -444,6 +530,7 @@ class Generator:
             cur_token,
             orig_input_pos.clone(),
             speculate_k,
+            batch=batch,
             need_probs=True,
             **sampling_kwargs,
         )
@@ -497,6 +584,9 @@ class Generator:
         max_new_tokens: int,
         *,
         chat_mode: bool,
+        batch: Optional[
+            Dict[str, Any]
+        ] = None,  # List of Image prompt tensors for multimodal models
         start_pos: int = 0,
         draft_model: Model,
         speculate_k: Optional[int] = 8,
@@ -515,31 +605,37 @@ class Generator:
         is_speculative = draft_model is not None
         device, dtype = prompt.device, prompt.dtype
 
-        # create an empty tensor of the expected final shape and
-        # fill in the current tokens
-        T = prompt.size(0)
-        max_new_tokens = min(max_new_tokens, max_seq_length - start_pos - T)
-        T_new = T + max_new_tokens
+        if len(prompt.shape) > 1:
+            prompt = prompt.squeeze(0)
+        prompt_length = prompt.size(0)
+        max_new_tokens = min(max_new_tokens, max_seq_length - start_pos - prompt_length)
         # set up caches only if first inference
         if start_pos == 0:
             model = model.to(device=device)
             with torch.device(device):
-                if self.is_torchtune_model:
-                    model.setup_caches(max_batch_size=1, dtype=self.dtype)
+                if (
+                    self.is_torchtune_model
+                    or self.model.config.model_type == ModelType.Flamingo
+                ):
+                    # 6404 is one-gpu affordable max_seq_length for single image input
+                    model.setup_caches(
+                        batch_size=1,
+                        dtype=self.dtype,
+                        encoder_max_seq_len=6404,
+                        decoder_max_seq_len=max_seq_length,
+                    )
                 else:
                     model.setup_caches(max_batch_size=1, max_seq_length=max_seq_length)
                 if is_speculative and draft_model is not model:
                     draft_model.setup_caches(
-                        max_batch_size=1, max_seq_length=max_seq_length
+                        max_batch_size=1,
+                        max_seq_length=max_seq_length,
                     )
+            if model.config.model_type == ModelType.Flamingo:
+                model.reset_caches()
 
-        # create an empty tensor of the expected final shape and
-        # fill in the current tokens
-        empty = torch.empty(T_new, dtype=dtype, device=device)
-        empty[:T] = prompt
-        seq = empty
         input_pos = torch.arange(
-            start_pos, T + start_pos, device=device, dtype=torch.int
+            start_pos, prompt_length + start_pos, device=device, dtype=torch.int
         )
 
         prefill_t0 = time.perf_counter()
@@ -547,6 +643,7 @@ class Generator:
             model,
             prompt.view(1, -1),
             input_pos,
+            batch=batch,
             sequential_prefill=sequential_prefill,
             **sampling_kwargs,
         )
@@ -558,13 +655,15 @@ class Generator:
                 sequential_prefill=sequential_prefill,
                 **sampling_kwargs,
             )
+
         time_to_first_token = time.perf_counter() - prefill_t0
         yield None, {"time_to_first_token": time_to_first_token}
-        seq[T] = next_token
         # max_new_tokens <= 2 means we are effectively not calling decode_n_tokens().
         callback(next_token.clone().view(-1), done_generating=max_new_tokens <= 2)
 
-        input_pos = torch.tensor([start_pos + T], device=device, dtype=torch.int)
+        input_pos = torch.tensor(
+            [start_pos + prompt_length], device=device, dtype=torch.int
+        )
         accept_counts = [0] * (
             speculate_k + 1
         )  # creates array of [0, 0, 0, ...] that is speculate_k + 1 long
@@ -582,12 +681,12 @@ class Generator:
                     cur_token,
                     input_pos,
                     speculate_k,
+                    batch=batch,
                     **sampling_kwargs,
                 )
 
                 accept_counts[len(next_tokens) - 1] += 1
-                num_added = min(T_new - input_pos - 1, len(next_tokens))
-                seq[input_pos + 1 : input_pos + num_added + 1] = next_tokens[:num_added]
+                num_added = min(max_new_tokens - input_pos - 1, len(next_tokens))
                 for token in next_tokens[:num_added,]:
                     callback(token)
                     yield token, None
@@ -600,6 +699,7 @@ class Generator:
                 next_token,
                 input_pos,
                 max_new_tokens - 1,
+                batch=batch,
                 callback=callback,
                 need_probs=False,
                 eos_token_id=self.tokenizer.eos_id() if self.tokenizer else 2,
@@ -610,13 +710,8 @@ class Generator:
                 ),
                 **sampling_kwargs,
             ):
-                generated_tokens.append(generated_token)
+                generated_tokens.append(generated_token.view(-1))
                 yield generated_token, None
-
-            seq[T + 1 : T + 1 + len(generated_tokens)] = torch.cat(generated_tokens)
-            seq = seq[
-                : T + 1 + len(generated_tokens)
-            ]  # If we dont generate all the way to max_new_tokens slice off the extra space we allocated.
 
         generate_stats = {
             "accept_counts": accept_counts,
@@ -649,16 +744,162 @@ class Generator:
             buffer.clear()
         # print(, end='', flush=True)
 
+    def _gen_model_input(
+        self,
+        prompt: Union[str | List[Any]],
+        image_prompts: Optional[List[str | Image.Image]] = None,
+        max_new_tokens: Optional[int] = None,
+        max_seq_len: Optional[int] = 2048,
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
+        """
+        Convert prompt and image prompts into consumable model input args.
+
+        When prompt is a list, the anticipated format is OpenAI API Inspired:
+            [ ..., {"role": message["role"], "content": message["content"]}, ...]
+
+        Args:
+            prompt (Union[str, List[Any]]): Prompt or list of dialog.
+            image_prompts (Optional[List[str | Image.Image]]): List of image prompts. Used only with Llama 3.2 11B.
+            max_new_tokens (Optional[int]): Maximum number of new tokens to generate. Used only with Llama 3.2 11B.
+
+        Returns:
+            Tuple[torch.Tensor, Optional[Dict[str, Any]]]: Encoded prompt and batch config for multimodal models.
+        """
+
+        # Text-Only model
+        if self.model.config.model_type != ModelType.Flamingo:
+            # Single String prompt
+            if isinstance(prompt, str):
+                encoded = self.encode_tokens(
+                    prompt, bos=True, device=self.builder_args.device
+                )
+            # List of dialog
+            else:
+                tokens = self.chat_formatter.encode_dialog_prompt(prompt)
+                encoded = torch.tensor(
+                    tokens, dtype=torch.int, device=self.builder_args.device
+                )
+
+            logging.debug(encoded)
+            return encoded, None
+
+        # Llama 3.2 11B
+        assert (
+            image_prompts is None or len(image_prompts) == 1
+        ), "At most one image is supported at the moment"
+
+        if image_prompts and isinstance(image_prompts[0], str):
+            images = [Image.open(image_prompts[0])]
+        else:
+            images = None
+
+        assert (
+            max_new_tokens is not None
+        ), "max_new_tokens must be specified for Flamingo models"
+
+        image_found = False
+        messages = []
+        for message in prompt:
+            if isinstance(message["content"], str):
+                if not image_found and image_prompts:
+                    messages.append(
+                        Message(
+                            role=message["role"],
+                            content=[
+                                {"type": "image", "content": images[0]},
+                                {"type": "text", "content": message["content"]},
+                            ],
+                        )
+                    )
+                    image_found = True
+                else:
+                    messages.append(Message(**message))
+
+            elif isinstance(message["content"], list):
+                images = None
+                for content_dict in message["content"]:
+                    if content_dict["type"] == "text":
+                        prompt_arg = content_dict["text"]
+                    elif content_dict["type"] == "image_url":
+                        assert (
+                            images is None
+                        ), "At most one image is supported at the moment"
+
+                        base64_decoded = base64.b64decode(
+                            content_dict["image_url"].split(";base64,")[1]
+                        )
+                        images = [Image.open(BytesIO(base64_decoded))]
+                        image_found = True
+
+                is_multimodal = images is not None
+                content = [{"type": "text", "content": prompt_arg}]
+
+                if is_multimodal:
+                    content = [{"type": "image", "content": images[0]}] + content
+
+                messages.append(
+                    Message(
+                        role=message["role"],
+                        content=content,
+                    )
+                )
+
+        messages.append(
+            Message(
+                role="assistant",
+                content="",
+            )
+        )
+
+        transform = llama3_2_vision_transform(str(self.tokenizer_args.tokenizer_path))
+
+        device = torch.device(device=self.builder_args.device)
+
+        with device, set_default_dtype(self.dtype):
+            data = transform({"messages": messages}, inference=True)
+
+            if image_found:
+                batch = padded_collate_tiled_images_and_mask(
+                    [data], pad_direction="left", pad_max_images=1
+                )
+                encoded = batch.pop("tokens").to(device).view(-1)
+                seq_len = encoded.size(0)
+                batch["encoder_mask"] = batch["encoder_mask"][:, :seq_len]
+                batch["encoder_input"]["images"] = batch["encoder_input"]["images"].to(
+                    self.dtype
+                )
+
+            else:
+                encoded = torch.tensor(data["tokens"], device=device).view(-1)
+                seq_len = encoded.size(0)
+                batch = {}
+
+            total_response_length = seq_len + max_new_tokens
+            batch["causal_mask"] = torch.nn.functional.pad(
+                torch.tril(
+                    torch.ones(
+                        size=(total_response_length, total_response_length),
+                        dtype=torch.bool,
+                    )
+                ),
+                (
+                    0,
+                    max_seq_len - total_response_length,
+                    0,
+                    max_seq_len - total_response_length,
+                ),
+                value=0,
+            )
+
+        logging.debug(encoded)
+        return encoded, batch
+
     def chat(
         self,
         generator_args: GeneratorArgs,
     ):
         if generator_args.chat_mode:
             print("Starting Interactive Chat")
-        encoded = self.encode_tokens(
-            generator_args.prompt, bos=True, device=self.builder_args.device
-        )
-        logging.debug(encoded)
 
         model_size = sum(
             [
@@ -687,22 +928,45 @@ class Generator:
                     self.model_forward, fullgraph=True, **kwargs
                 )
 
-            self.decode_one_token = torch.compile(
-                self.decode_one_token, fullgraph=True, **kwargs
-            )
+            if self.model.config.model_type == ModelType.Flamingo:
+                # Based on https://github.com/pytorch/torchtune/blob/57ab583c84c4a9dcacac23aeabc81f2a679670fe/torchtune/training/_compile.py#L42-L52
+                from torchtune.modules import (
+                    TransformerCrossAttentionLayer,
+                    TransformerSelfAttentionLayer,
+                )
+                decoder = self.model.model.decoder 
+                for m in reversed(list(decoder.modules())):
+                    if isinstance(m, TransformerSelfAttentionLayer) or isinstance(
+                        m, TransformerCrossAttentionLayer
+                    ):
+                        m.compile()
+            else:
+                self.decode_one_token = torch.compile(
+                    self.decode_one_token, fullgraph=True, **kwargs
+                )
 
             if generator_args.compile_prefill:
-                self.prefill = torch.compile(self.prefill, fullgraph=True, dynamic=True, **kwargs)
+                self.prefill = torch.compile(
+                    self.prefill, fullgraph=True, dynamic=True, **kwargs
+                )
 
         self.system_prompt = None
         # Set up our max_seq_length
 
         # This is a hack to get around the fact that different models have different ways to record their max_seq_length and might be wrong
         # TODO: unify the max_seq_length config representation.
-        if generator_args.is_torchtune_model:
-            max_seq_length = self.model.config.transformer_args["text"]["max_seq_len"]
-        elif generator_args.chat_mode:
-            max_seq_length = self.model.config.transformer_args["text"].max_seq_length
+        text_transformer_args = self.model.text_transformer_args
+        max_seq_length = (
+            text_transformer_args.max_seq_length if text_transformer_args else 2048
+        )
+        encoded, batch = self._gen_model_input(
+            [{"role": "user", "content": generator_args.prompt}],
+            generator_args.image_prompts,
+            generator_args.max_new_tokens,
+            max_seq_length,
+        )
+
+        if generator_args.chat_mode:
             print(
                 f"Entering Chat Mode. Will continue chatting back and forth with the language model until the models max context length of {max_seq_length} tokens is hit or until the user says /bye"
             )
@@ -712,10 +976,18 @@ class Generator:
             if get_system_prompt == "y" or get_system_prompt == "Y":
                 self.system_prompt = input("What is your system prompt? \n")
 
-        else:
+        # `is_torchtune_model` is a misnomer since it doesn't capture all
+        # torchtune models (i.e. Flamingo)
+        # See Issue: https://github.com/pytorch/torchchat/issues/1273
+        elif not generator_args.is_torchtune_model and self.model.config.model_type != ModelType.Flamingo:
             max_seq_length = min(
                 encoded.size(0) + generator_args.max_new_tokens,
-                self.model.config.transformer_args["text"].block_size,
+                (
+                    text_transformer_args.block_size
+                    if text_transformer_args is not None
+                    else 2048
+                ),
+                max_seq_length,
             )
 
         max_seq_length = (
@@ -772,9 +1044,7 @@ class Generator:
                         encoded = self.chat_formatter.encode_message(
                             {"role": "user", "content": prompt}
                         )
-                        encoded.extend(
-                            self.chat_formatter.encode_header("assistant")
-                        )
+                        encoded.extend(self.chat_formatter.encode_header("assistant"))
                     encoded = torch.tensor(
                         encoded, dtype=torch.int, device=self.builder_args.device
                     )
@@ -809,6 +1079,7 @@ class Generator:
 
             if self.profile:
                 from torch._inductor import config as inductor_config
+
                 torch._inductor.config.profiler_mark_wrapper_call = True
                 torch._inductor.config.cpp.enable_kernel_profile = True
             if (i != generator_args.num_samples - 1 or not self.profile) or (
@@ -830,6 +1101,7 @@ class Generator:
                     draft_model=self.draft_model,
                     speculate_k=generator_args.speculate_k,
                     chat_mode=generator_args.chat_mode,
+                    batch=batch,
                     callback=callback,
                     temperature=generator_args.temperature,
                     top_k=generator_args.top_k,
